@@ -1,6 +1,6 @@
 // ui.js
 import * as Constants from './constants.js';
-import { fetchQuickReplies } from './api.js';
+import { fetchQuickReplies } from './api.js'; // fetchQuickReplies is now synchronous
 import { sharedState } from './state.js';
 // No longer need extension_settings here directly
 
@@ -179,8 +179,9 @@ export function createEmptyPlaceholder(message) {
 /**
  * Updates the visibility of the menu UI and related ARIA attributes.
  * Fetches and renders content if the menu is being shown.
+ * This function is now synchronous again.
  */
-export function updateMenuVisibilityUI() {
+export function updateMenuVisibilityUI() { // No longer async
     const { menu, rocketButton } = sharedState.domElements;
     const show = sharedState.menuVisible;
 
@@ -191,9 +192,10 @@ export function updateMenuVisibilityUI() {
 
     if (show) {
         // Update content *before* showing
-        console.log(`[${Constants.EXTENSION_NAME}] Opening menu, fetching replies (including JS Runner)...`);
+        console.log(`[${Constants.EXTENSION_NAME}] Opening menu, fetching replies (including JS Runner from state)...`);
         try {
-            const { chat, global } = fetchQuickReplies(); // From api.js (now includes JS runner in chat)
+            // Call the synchronous fetchQuickReplies
+            const { chat, global } = fetchQuickReplies(); // No await needed
              if (chat === undefined || global === undefined) {
                  throw new Error("fetchQuickReplies did not return expected structure.");
              }
