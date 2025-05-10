@@ -1,14 +1,14 @@
 // api.js
 import * as Constants from './constants.js';
-import { setMenuVisible } from './state.js'; // 假设 state.js 仍然存在且被需要
+import { sharedState, setMenuVisible } from './state.js'; // 导入 sharedState
 
 /**
  * Fetches chat and global quick replies from the quickReplyApi.
  * Checks if the main Quick Reply v2 extension is enabled before fetching.
- * Also scans for JS Runner buttons and adds them to chat replies.
+ * Also includes JS Runner buttons data collected by MutationObserver.
  * @returns {{ chat: Array<object>, global: Array<object> }}
  */
-export function fetchQuickReplies() {
+export function fetchQuickReplies() { // This function is no longer async
     console.log(`[${Constants.EXTENSION_NAME} Debug] fetchQuickReplies called.`);
     let chatReplies = [];
     const globalReplies = [];
@@ -17,11 +17,10 @@ export function fetchQuickReplies() {
     // --- 检查 Quick Reply API ---
     if (!window.quickReplyApi) {
         console.error(`[${Constants.EXTENSION_NAME}] Quick Reply API (window.quickReplyApi) not found! Cannot fetch standard replies.`);
-        // 即使 API 不存在，仍然尝试扫描 JS Runner
+        // 即使 API 不存在，仍然尝试从共享状态获取 JS Runner 按钮
     } else {
         // --- 获取标准 Quick Reply (仅当 API 存在且启用时) ---
         const qrApi = window.quickReplyApi;
-        // 注意：我们假设 isEnabled=true 或 undefined 时都算启用，只有明确为 false 才算禁用
         if (!qrApi.settings || qrApi.settings.isEnabled === false) {
             console.log(`[${Constants.EXTENSION_NAME}] Core Quick Reply v2 is disabled. Skipping standard reply fetch.`);
         } else {
@@ -32,14 +31,14 @@ export function fetchQuickReplies() {
                     qrApi.settings.chatConfig.setList.forEach(setLink => {
                         if (setLink?.isVisible && setLink.set?.qrList) {
                             setLink.set.qrList.forEach(qr => {
-                                if (qr && !qr.isHidden && qr.label) { // Added check for qr object and label
+                                if (qr && !qr.isHidden && qr.label) {
                                     chatReplies.push({
                                         setName: setLink.set.name || 'Unknown Set',
                                         label: qr.label,
                                         message: qr.message || '(无消息内容)',
-                                        isStandard: true // 标记为标准 Quick Reply
+                                        isStandard: true
                                     });
-                                    chatQrLabels.add(qr.label); // Add label to set for deduplication
+                                    chatQrLabels.add(qr.label);
                                 }
                             });
                         }
@@ -59,9 +58,8 @@ export function fetchQuickReplies() {
                                         setName: setLink.set.name || 'Unknown Set',
                                         label: qr.label,
                                         message: qr.message || '(无消息内容)',
-                                        isStandard: true // 标记为标准 Quick Reply
+                                        isStandard: true
                                     });
-                                    // No need to add to chatQrLabels here, it's for chat/global deduplication
                                 }
                             });
                         }
@@ -73,64 +71,28 @@ export function fetchQuickReplies() {
 
             } catch (error) {
                 console.error(`[${Constants.EXTENSION_NAME}] Error fetching standard quick replies:`, error);
-                // 不清空数组，允许继续扫描 JS Runner
             }
         }
     }
 
     // ***************************************************************
-    // --- 修改：扫描 JS Runner 按钮 (增强功能) ---
-    // 根据我们之前的讨论，使用正确的选择器来查找 JS Runner 按钮
+    // --- 修改：从共享状态获取 JS Runner 按钮数据 ---
     // ***************************************************************
-    console.log(`[${Constants.EXTENSION_NAME} Debug] Starting JS Runner button scan...`);
-    try {
-        // 查找所有 JS-Slash-Runner 脚本的按钮组容器
-        // 这些容器有类名 'qr--buttons' 和 'th-button'，并且在 #qr--bar 内部
-        // 使用 jQuery 选择器
-        const jsRunnerButtonContainers = $('#send_form #qr--bar .qr--buttons.th-button');
-
-        if (jsRunnerButtonContainers.length > 0) {
-            console.log(`[${Constants.EXTENSION_NAME} Debug] Found ${jsRunnerButtonContainers.length} JS Runner button containers.`);
-
-            const scannedJsLabels = new Set(); // 用于防止重复添加 JS Runner 按钮
-
-            jsRunnerButtonContainers.each(function() {
-                const container = $(this);
-                // 查找容器内的实际按钮元素
-                // 这些按钮有类名 'qr--button', 'menu_button', 'interactable'
-                const jsRunnerButtons = container.find('.qr--button.menu_button.interactable');
-
-                jsRunnerButtons.each(function() {
-                    const buttonDiv = $(this);
-                    const label = buttonDiv.text()?.trim(); // 获取按钮上显示的文本作为 label
-                    // 检查标签是否有效，并且尚未被标准QR或已扫描的JS按钮使用
-                    if (label && label !== '' && !chatQrLabels.has(label) && !scannedJsLabels.has(label)) {
-                        console.log(`[${Constants.EXTENSION_NAME} Debug] Adding JS Runner button: Label='${label}'`);
-                        chatReplies.push({
-                            setName: 'JS脚本按钮',         // 自定义分类名
-                            label: label,                 // 按钮显示的文字
-                            message: `[JS Runner] ${label}`, // 内部标识符或提示文本
-                            isStandard: false             // 核心标记：表明不是标准QR
-                        });
-                        scannedJsLabels.add(label); // 记录已添加的JS按钮标签
-                        chatQrLabels.add(label);    // 也添加到总的标签集合，以防全局QR中添加同名项
-                    } else if (label && (chatQrLabels.has(label) || scannedJsLabels.has(label))) {
-                         // 如果标签重复了，记录一下日志
-                         console.log(`[${Constants.EXTENSION_NAME} Debug] Skipping duplicate JS Runner button (label already exists): Label='${label}'`);
-                    } else if (!label || label === '') {
-                        // 如果按钮没有有效标签，也记录一下
-                         console.log(`[${Constants.EXTENSION_NAME} Debug] Skipping JS Runner button with empty label.`);
-                    }
-                });
-            });
-             console.log(`[${Constants.EXTENSION_NAME} Debug] Finished scanning JS Runner buttons. Added ${scannedJsLabels.size} unique buttons.`);
-        } else {
-            console.log(`[${Constants.EXTENSION_NAME} Debug] No JS Runner button containers (.qr--buttons.th-button) found in the DOM.`);
+    console.log(`[${Constants.EXTENSION_NAME} Debug] Including JS Runner buttons from shared state...`);
+    const initialJsCount = chatReplies.length;
+    // 遍历共享状态中存储的 JS Runner 按钮数据
+    sharedState.jsRunnerButtonsData.forEach(jsButton => {
+        // 再次检查标签是否已存在，防止与标准QR或之前添加的JS按钮重复
+        if (jsButton.label && !chatQrLabels.has(jsButton.label)) {
+             console.log(`[${Constants.EXTENSION_NAME} Debug] Adding JS Runner button from state: Label='${jsButton.label}'`);
+             chatReplies.push(jsButton);
+             chatQrLabels.add(jsButton.label); // Add to set to prevent duplicates in global
+        } else if (jsButton.label) {
+            console.log(`[${Constants.EXTENSION_NAME} Debug] Skipping JS Runner button from state due to duplicate label: Label='${jsButton.label}'`);
         }
-    } catch (error) {
-        console.error(`[${Constants.EXTENSION_NAME}] Error during JS Runner button scanning:`, error);
-    }
-    // --- JS Runner 扫描结束 ---
+    });
+     console.log(`[${Constants.EXTENSION_NAME} Debug] Added ${chatReplies.length - initialJsCount} JS Runner buttons from state.`);
+    // --- JS Runner 数据获取结束 ---
 
     console.log(`[${Constants.EXTENSION_NAME} Debug] Final fetch results - Chat (incl. JS): ${chatReplies.length}, Global: ${globalReplies.length}`);
     return { chat: chatReplies, global: globalReplies };
