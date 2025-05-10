@@ -5,6 +5,7 @@ import { createMenuElement } from './ui.js';
 // 从 settings.js 导入核心功能
 import { createSettingsHtml, loadAndApplySettings as loadAndApplySettingsToPanel, updateIconDisplay } from './settings.js';
 import { setupEventListeners, handleQuickReplyClick, updateMenuStylesUI } from './events.js';
+import { fetchQuickReplies } from './api.js'; // 导入 fetchQuickReplies 以便在 MutationObserver 回调中使用其逻辑（虽然 api.js 会修改，但这里需要导入）
 
 // 创建本地设置对象，如果全局对象不存在
 if (typeof window.extension_settings === 'undefined') {
@@ -16,8 +17,8 @@ if (!window.extension_settings[Constants.EXTENSION_NAME]) {
         enabled: true,
         iconType: Constants.ICON_TYPES.ROCKET,
         customIconUrl: '',
-        customIconSize: Constants.DEFAULT_CUSTOM_ICON_SIZE, 
-        faIconCode: '',                                  
+        customIconSize: Constants.DEFAULT_CUSTOM_ICON_SIZE,
+        faIconCode: '',
         matchButtonColors: true,
         menuStyles: JSON.parse(JSON.stringify(Constants.DEFAULT_MENU_STYLES)),
         savedCustomIcons: []
@@ -70,6 +71,103 @@ function updateIconPreview(iconType) {
     return;
 }
 
+// --- 新增：设置 MutationObserver 监听 JS Runner 按钮的出现 ---
+function setupMutationObserver() {
+    // 监听 #send_form 元素，因为它包含 #qr--bar 和 JS Runner 按钮
+    const targetNode = document.getElementById('send_form');
+    if (!targetNode) {
+        console.warn(`[${Constants.EXTENSION_NAME}] Target node #send_form not found for MutationObserver.`);
+        // Maybe retry finding the target node later? Or observe body?
+        // For now, just warn and return. Observing body might be too broad.
+        return;
+    }
+
+    const observerConfig = { childList: true, subtree: true }; // 监听子节点的添加/移除以及更深层级的变化
+
+    const observer = new MutationObserver(mutations => {
+        mutations.forEach(mutation => {
+            if (mutation.addedNodes.length > 0) {
+                mutation.addedNodes.forEach(node => {
+                    // 检查添加的节点自身或其子节点是否是 JS Runner 按钮容器
+                    if (node.nodeType === Node.ELEMENT_NODE) {
+                        const $node = $(node);
+                        let $jsRunnerContainers = $node.is('.qr--buttons.th-button') ? $node : $node.find('.qr--buttons.th-button');
+
+                        if ($jsRunnerContainers.length > 0) {
+                            console.log(`[${Constants.EXTENSION_NAME}] MutationObserver detected JS Runner button container(s).`);
+                            $jsRunnerContainers.each(function() {
+                                const $container = $(this);
+                                // 查找容器内的实际按钮元素
+                                const $jsRunnerButtons = $container.find('.qr--button.menu_button.interactable');
+
+                                $jsRunnerButtons.each(function() {
+                                    const $buttonDiv = $(this);
+                                    const label = $buttonDiv.text()?.trim();
+                                    // 检查标签是否有效，并且尚未被添加
+                                    if (label && label !== '' && !sharedState.jsRunnerLabels.has(label)) {
+                                        console.log(`[${Constants.EXTENSION_NAME} Debug] Observer adding JS Runner button: Label='${label}'`);
+                                        sharedState.jsRunnerButtonsData.push({
+                                            setName: 'JS脚本按钮',         // 自定义分类名
+                                            label: label,                 // 按钮显示的文字
+                                            message: `[JS Runner] ${label}`, // 内部标识符或提示文本
+                                            isStandard: false             // 核心标记：表明不是标准QR
+                                        });
+                                        sharedState.jsRunnerLabels.add(label); // 记录已添加的JS按钮标签
+                                    } else if (label && sharedState.jsRunnerLabels.has(label)) {
+                                         console.log(`[${Constants.EXTENSION_NAME} Debug] Observer skipping duplicate JS Runner button: Label='${label}'`);
+                                    } else if (!label || label === '') {
+                                         console.log(`[${Constants.EXTENSION_NAME} Debug] Observer skipping JS Runner button with empty label.`);
+                                    }
+                                });
+                            });
+                             console.log(`[${Constants.EXTENSION_NAME}] Observer finished processing added nodes. Current JS Runner buttons count in state: ${sharedState.jsRunnerButtonsData.length}`);
+                        }
+                    }
+                });
+            }
+            // Note: We are only observing additions, not removals.
+            // If JS Runner buttons can be removed and re-added, we might need to handle removals too.
+            // For now, assume they are added once and stay until chat change or page reload.
+        });
+    });
+
+    // 开始观察目标节点
+    observer.observe(targetNode, observerConfig);
+    console.log(`[${Constants.EXTENSION_NAME}] MutationObserver setup on #send_form.`);
+
+    // Optional: Initial scan in case buttons are already there before observer setup completes
+    // This might be redundant if setup is fast, but adds robustness.
+    // We can call the same logic as in the observer callback for existing elements.
+    $(targetNode).find('.qr--buttons.th-button').each(function() {
+         const $container = $(this);
+         $container.find('.qr--button.menu_button.interactable').each(function() {
+             const $buttonDiv = $(this);
+             const label = $buttonDiv.text()?.trim();
+              if (label && label !== '' && !sharedState.jsRunnerLabels.has(label)) {
+                 console.log(`[${Constants.EXTENSION_NAME} Debug] Initial scan adding JS Runner button: Label='${label}'`);
+                 sharedState.jsRunnerButtonsData.push({
+                     setName: 'JS脚本按钮',
+                     label: label,
+                     message: `[JS Runner] ${label}`,
+                     isStandard: false
+                 });
+                 sharedState.jsRunnerLabels.add(label);
+             } else if (label && sharedState.jsRunnerLabels.has(label)) {
+                  console.log(`[${Constants.EXTENSION_NAME} Debug] Initial scan skipping duplicate JS Runner button: Label='${label}'`);
+             } else if (!label || label === '') {
+                  console.log(`[${Constants.EXTENSION_NAME} Debug] Initial scan skipping JS Runner button with empty label.`);
+             }
+         });
+    });
+     console.log(`[${Constants.EXTENSION_NAME}] Initial JS Runner button scan complete. Count in state: ${sharedState.jsRunnerButtonsData.length}`);
+
+
+    // Consider adding a way to disconnect the observer on plugin cleanup if needed
+    // For now, it can live for the lifetime of the page.
+}
+// --- MutationObserver 设置结束 ---
+
+
 /**
  * Initializes the plugin: creates UI, sets up listeners, loads settings.
  */
@@ -98,8 +196,8 @@ function initializePlugin() {
         // sharedState.domElements.iconTypeDropdown = document.getElementById(Constants.ID_ICON_TYPE_DROPDOWN);
         // ... 其他设置元素 ...
          sharedState.domElements.customIconUrl = document.getElementById(Constants.ID_CUSTOM_ICON_URL);
-         sharedState.domElements.customIconSizeInput = document.getElementById(Constants.ID_CUSTOM_ICON_SIZE_INPUT); // <-- 新增
-         sharedState.domElements.faIconCodeInput = document.getElementById(Constants.ID_FA_ICON_CODE_INPUT);       // <-- 新增
+         sharedState.domElements.customIconSizeInput = document.getElementById(Constants.ID_CUSTOM_ICON_SIZE_INPUT);
+         sharedState.domElements.faIconCodeInput = document.getElementById(Constants.ID_FA_ICON_CODE_INPUT);
          sharedState.domElements.colorMatchCheckbox = document.getElementById(Constants.ID_COLOR_MATCH_CHECKBOX);
 
 
@@ -113,21 +211,24 @@ function initializePlugin() {
                 const enabledDropdown = document.getElementById(Constants.ID_SETTINGS_ENABLED_DROPDOWN);
                 const iconTypeDropdown = document.getElementById(Constants.ID_ICON_TYPE_DROPDOWN);
                 const customIconUrl = document.getElementById(Constants.ID_CUSTOM_ICON_URL);
-                const customIconSizeInput = document.getElementById(Constants.ID_CUSTOM_ICON_SIZE_INPUT); // <-- 新增
-                const faIconCodeInput = document.getElementById(Constants.ID_FA_ICON_CODE_INPUT);       // <-- 新增
+                const customIconSizeInput = document.getElementById(Constants.ID_CUSTOM_ICON_SIZE_INPUT);
+                const faIconCodeInput = document.getElementById(Constants.ID_FA_ICON_CODE_INPUT);
                 const colorMatchCheckbox = document.getElementById(Constants.ID_COLOR_MATCH_CHECKBOX);
 
                 if (enabledDropdown) settings.enabled = enabledDropdown.value === 'true';
                 if (iconTypeDropdown) settings.iconType = iconTypeDropdown.value;
-                if (customIconUrl) settings.customIconUrl = customIconUrl.value;
-                if (customIconSizeInput) settings.customIconSize = parseInt(customIconSizeInput.value, 10) || Constants.DEFAULT_CUSTOM_ICON_SIZE; // <-- 新增
-                if (faIconCodeInput) settings.faIconCode = faIconCodeInput.value;                         // <-- 新增
+                 // Check customIconUrl for dataset.fullValue before saving
+                 if (customIconUrl) {
+                     settings.customIconUrl = customIconUrl.dataset.fullValue || customIconUrl.value;
+                 }
+                if (customIconSizeInput) settings.customIconSize = parseInt(customIconSizeInput.value, 10) || Constants.DEFAULT_CUSTOM_ICON_SIZE;
+                if (faIconCodeInput) settings.faIconCode = faIconCodeInput.value;
                 if (colorMatchCheckbox) settings.matchButtonColors = colorMatchCheckbox.checked;
 
                 // 更新图标显示以反映最新设置
                 updateIconDisplay();
 
-                // 更新图标预览 (可选，如果设置面板可见)
+                // 更新图标预览 (可选, 如果设置面板可见)
                 if (document.getElementById(Constants.ID_SETTINGS_CONTAINER)?.offsetParent !== null) {
                      updateIconPreview(settings.iconType);
                 }
@@ -175,13 +276,13 @@ function initializePlugin() {
                          saveStatus.textContent = '✗ 保存失败';
                           saveStatus.style.color = '#f44336';
                      }
-                     setTimeout(() => { saveStatus.textContent = ''; }, 2000);
+                     setTimeout(() => { if(saveStatus.textContent === '样式已应用，请保存设置' || saveStatus.textContent.startsWith('✓') || saveStatus.textContent.startsWith('✗')) saveStatus.textContent = ''; }, 2000);
                  }
 
                  // 更新保存按钮视觉反馈
                  const saveButton = document.getElementById('qr-save-settings');
                  if (saveButton && success) {
-                     const originalText = '<i class="fa-solid fa-floppy-disk"></i> 保存设置'; // 原始 HTML
+                     const originalText = saveButton.innerHTML; // 保存原始 HTML
                      const originalBg = saveButton.style.backgroundColor;
                      saveButton.innerHTML = '<i class="fa-solid fa-check"></i> 已保存';
                      saveButton.style.backgroundColor = '#4caf50';
@@ -202,6 +303,10 @@ function initializePlugin() {
 
         // Load settings and apply initial UI state (like button visibility and icon)
         loadAndApplyInitialSettings(); // 使用下面的新函数
+
+        // --- 新增：设置 MutationObserver ---
+        setupMutationObserver();
+        // --- 结束新增 ---
 
         // Setup event listeners for the button, menu, etc.
         setupEventListeners(); // events.js
@@ -228,8 +333,8 @@ function loadAndApplyInitialSettings() {
     settings.enabled = settings.enabled !== false;
     settings.iconType = settings.iconType || Constants.ICON_TYPES.ROCKET;
     settings.customIconUrl = settings.customIconUrl || '';
-    settings.customIconSize = settings.customIconSize || Constants.DEFAULT_CUSTOM_ICON_SIZE; // <-- 新增
-    settings.faIconCode = settings.faIconCode || '';                                  // <-- 新增
+    settings.customIconSize = settings.customIconSize || Constants.DEFAULT_CUSTOM_ICON_SIZE;
+    settings.faIconCode = settings.faIconCode || '';
     settings.matchButtonColors = settings.matchButtonColors !== false;
     settings.menuStyles = settings.menuStyles || JSON.parse(JSON.stringify(Constants.DEFAULT_MENU_STYLES));
 
@@ -270,7 +375,21 @@ function loadSettingsFromLocalStorage() {
             const parsedSettings = JSON.parse(savedSettings);
             // 将保存的设置合并到当前设置 (确保新字段也能被加载)
             const currentSettings = extension_settings[Constants.EXTENSION_NAME];
+            // 使用 Object.assign 进行浅合并，如果需要深合并，请使用 _.merge 或其他深拷贝方法
+            // 这里只合并顶层属性，对 menuStyles 进行深拷贝以避免引用问题
+             if (parsedSettings.menuStyles) {
+                 parsedSettings.menuStyles = JSON.parse(JSON.stringify(parsedSettings.menuStyles));
+             }
             Object.assign(currentSettings, parsedSettings); // 合并，localStorage中的值会覆盖默认值
+
+            // 恢复大型customIconUrl数据，如果存储在dataset中
+             const customIconUrlInput = document.getElementById(Constants.ID_CUSTOM_ICON_URL);
+             if (customIconUrlInput && currentSettings.customIconUrl && currentSettings.customIconUrl.length > 1000) {
+                 customIconUrlInput.dataset.fullValue = currentSettings.customIconUrl;
+                 customIconUrlInput.value = "[图片数据已保存，但不在输入框显示以提高性能]";
+             }
+
+
             console.log(`[${Constants.EXTENSION_NAME}] 从localStorage加载了设置:`, currentSettings);
             return true;
         }
